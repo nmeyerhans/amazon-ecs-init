@@ -33,7 +33,7 @@ WantedBy=multi-user.target
 [Service]
 # The logic around the ECS Agent restart:
 #   - Restart on failure
-#   - Wait 15 seconds between restart
+#   - Wait 5 seconds between restart
 #   - If the ECS Agent restarts more then 10 times in 5 minutes,
 # it will stay failed
 Type=simple
