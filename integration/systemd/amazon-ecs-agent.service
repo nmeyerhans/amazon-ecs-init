@@ -62,12 +62,12 @@ ExecStartPre=-/usr/bin/echo "Amazon ECS Agent systemd unit file version 1.0.0"
 
 # Load an updated ECS Agent, if it exists:
 ExecStartPre=-/bin/sh -c 'test -f /var/cache/ecs/desired-image && \
-    docker load $(cat /var/cache/ecs/desired-image) \
+    docker load --quiet --input=/var/cache/ecs/desired-image \
     && rm -f $(cat /var/cache/ecs/desired-image) /var/cache/ecs/desired-image'
 
 # If we don't have an ECS Agent, load from disk, if possible, or Docker Hub:
-ExecStartPre=/bin/sh -c "docker inspect amazon/amazon-ecs-agent \
-    || docker load --quiet < /var/cache/ecs/ecs-agent.tar \
+ExecStartPre=/bin/sh -c "`docker inspect amazon/amazon-ecs-agent &>/dev/null` \
+    || docker load --quiet -input=/var/cache/ecs/ecs-agent.tar \
     || docker pull amazon/amazon-ecs-agent:${ECS_AGENT_VERSION}"
 
 # Add the IPTable rules needed to enable IAM Roles for Tasks.
@@ -81,10 +81,10 @@ ExecStartPre=/sbin/sysctl --quiet --write net.ipv4.conf.all.route_localnet=1
 
 # Stop the ECS Agent if it was running. Docker stop is used
 # as it will send a SIGTEM and wait 10 seconds before sending SIGKILL
-ExecStartPre=-/usr/bin/docker stop --time 10 ecs-agent
+ExecStartPre=-/bin/sh -c "`docker stop --time 10 ecs-agent &>/dev/null`"
 
 # Remove the container named "ecs-agent"
-ExecStartPre=-/usr/bin/docker rm ecs-agent
+ExecStartPre=-/bin/sh -c "`docker rm ecs-agent &>/dev/null`"
 
 # Create the directories needed for the ECS Agent.
 ExecStartPre=-/bin/mkdir -p /var/lib/ecs/dhclient /var/ecs-data
@@ -118,12 +118,13 @@ ExecStart=/usr/bin/docker run --name ecs-agent \
     --env ECS_LOGFILE=/log/ecs-agent.log \
     --env ECS_AVAILABLE_LOGGING_DRIVERS=["json-file","syslog","awslogs","none"] \
     --env ECS_CGROUP_PREFIX=ecs \
+    --log-driver=journald \
     --env-file=/etc/ecs/ecs.config \
     amazon/amazon-ecs-agent:${ECS_AGENT_VERSION}
 
 # Docker stop is used as it will send a SIGTEM and wait 10 seconds
 # before sending SIGKILL
-ExecStop=/usr/bin/docker stop --time 10 ecs-agent
+ExecStartPre=-/bin/sh -c "`docker stop --time 10 ecs-agent &>/dev/null`"
 
 # Remove the IPTable rules needed to enable IAM Roles for Tasks.
 ExecStopPost=-/sbin/iptables -t nat -D PREROUTING -d 169.254.170.2/32 \
