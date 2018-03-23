@@ -1,4 +1,4 @@
-# Copyright 2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the
 # "License"). You may not use this file except in compliance
@@ -11,10 +11,11 @@
 # CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and
 # limitations under the License.
-#
+
 # A systemd unit file to run `ecs-agent` in a Docker container. This service
 # attempts to duplicate the functionality of the `ecs-init` Golang package. The
 # notable differences currently are:
+#
 # 1. The unit file does an unconditional pull of the latest ECS Agent from
 # Docker Hub at startup.
 # 2. The unit file does not currently handle the Agent's self-upgrade
@@ -30,52 +31,107 @@ After=docker.service
 WantedBy=multi-user.target
 
 [Service]
-Environment=AGENT_TAG=v1.17.0
+# The logic around the ECS Agent restart:
+#   - Restart on failure
+#   - Wait 15 seconds between restart
+#   - If the ECS Agent restarts more then 10 times in 5 minutes,
+# it will stay failed
 Type=simple
-# Load an updated agent, if it exists:
-ExecStartPre=-/bin/sh -c 'test -f /var/cache/ecs/desired-image && docker load $(cat /var/cache/ecs/desired-image) && rm -f $(cat /var/cache/ecs/desired-image) /var/cache/ecs/desired-image'
-# If we don't have an agent, load from disk, if possible, or Docker Hub:
-ExecStartPre=/bin/sh -c "docker inspect amazon/amazon-ecs-agent || docker load < /var/cache/ecs/ecs-agent.tar || docker pull amazon/amazon-ecs-agent:${AGENT_TAG}"
-ExecStartPre=/sbin/iptables -t nat -A PREROUTING -d 169.254.170.2/32 \
- -p tcp -m tcp --dport 80 -j DNAT --to-destination 127.0.0.1:51679
-ExecStartPre=/sbin/iptables -t nat -A OUTPUT -d 169.254.170.2/32 \
- -p tcp -m tcp --dport 80 -j REDIRECT --to-ports 51679
-ExecStartPre=/sbin/sysctl -w net.ipv4.conf.all.route_localnet=1
-ExecStartPre=-/usr/bin/docker rm ecs-agent
-ExecStartPre=-/bin/mkdir -p /var/lib/ecs/dhclient
-ExecStart=/usr/bin/docker run --name ecs-agent \
-  --init \
-  --restart=on-failure:10 \
-  --volume=/var/run:/var/run \
-  --volume=/var/log/ecs/:/log \
-  --volume=/var/lib/ecs/data:/data \
-  --volume=/etc/ecs:/etc/ecs \
-  --volume=/sbin:/sbin \
-  --volume=/lib:/lib \
-  --volume=/lib64:/lib64 \
-  --volume=/usr/lib:/usr/lib \
-  --volume=/proc:/host/proc \
-  --volume=/sys/fs/cgroup:/sys/fs/cgroup \
-  --volume=/var/lib/ecs/dhclient:/var/lib/dhclient \
-  --net=host \
-  --env ECS_LOGFILE=/log/ecs-agent.log \
-  --env ECS_DATADIR=/data \
-  --env ECS_UPDATES_ENABLED=false \
-  --env ECS_AVAILABLE_LOGGING_DRIVERS='["json-file","syslog","awslogs"]' \
-  --env ECS_ENABLE_TASK_IAM_ROLE=true \
-  --env ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true \
-  --env ECS_UPDATES_ENABLED=true \
-  --env ECS_ENABLE_TASK_ENI=true \
-  --env-file=/etc/ecs/ecs.config \
-  --cap-add=sys_admin \
-  --cap-add=net_admin \
-  amazon/amazon-ecs-agent:${AGENT_TAG}
-ExecStop=/usr/bin/docker stop ecs-agent
-ExecStopPost=-/sbin/iptables -t nat -D PREROUTING -d 169.254.170.2/32 \
- -p tcp -m tcp --dport 80 -j DNAT --to-destination 127.0.0.1:51679
-ExecStopPost=-/sbin/iptables -t nat -D OUTPUT -d 169.254.170.2/32 \
- -p tcp -m tcp --dport 80 -j REDIRECT --to-ports 51679
-ExecStopPost=/bin/sh -c \
- "/sbin/sysctl -w net.ipv4.conf.all.route_localnet=$(/sbin/sysctl -q -n net.ipv4.conf.default.route_localnet)"
 Restart=on-failure
+RestartSec=5s
 RestartPreventExitStatus=5
+StartLimitInterval=5min
+StartLimitBurst=10
+
+# It is recommended in production to version pin the ECS Agent 
+# to a known version vs running the latest flag on the docker container.
+# See https://github.com/aws/amazon-ecs-agent/releases for agent versions.
+
+# It is recommended to use a systemd drop-in file vs editing this line or file.
+# Your drop-in file could look like this:
+#
+#       [Service]
+#       Environment=ECS_AGENT_VERSION=v1.17.2
+#
+# Depending on the OS, it could be placed in 
+# /etc/systemd/system/amazon-ecs-agent.d , and named 
+# ecs_agent_version_override.conf
+Environment=ECS_AGENT_VERSION=v1.17.2
+
+ExecStartPre=-/usr/bin/echo "Amazon ECS Agent systemd unit file version 1.0.0"
+
+# Load an updated ECS Agent, if it exists:
+ExecStartPre=-/bin/sh -c 'test -f /var/cache/ecs/desired-image && \
+    docker load $(cat /var/cache/ecs/desired-image) \
+    && rm -f $(cat /var/cache/ecs/desired-image) /var/cache/ecs/desired-image'
+
+# If we don't have an ECS Agent, load from disk, if possible, or Docker Hub:
+ExecStartPre=/bin/sh -c "docker inspect amazon/amazon-ecs-agent \
+    || docker load --quiet < /var/cache/ecs/ecs-agent.tar \
+    || docker pull amazon/amazon-ecs-agent:${ECS_AGENT_VERSION}"
+
+# Add the IPTable rules needed to enable IAM Roles for Tasks.
+ExecStartPre=/sbin/iptables -t nat -A PREROUTING -d 169.254.170.2/32 \
+    -p tcp -m tcp --dport 80 -j DNAT --to-destination 127.0.0.1:51679
+ExecStartPre=/sbin/iptables -t nat -A OUTPUT -d 169.254.170.2/32 \
+    -p tcp -m tcp --dport 80 -j REDIRECT --to-ports 51679
+
+# Allow the port proxy to route traffic using loopback addresses
+ExecStartPre=/sbin/sysctl --quiet --write net.ipv4.conf.all.route_localnet=1
+
+# Stop the ECS Agent if it was running. Docker stop is used
+# as it will send a SIGTEM and wait 10 seconds before sending SIGKILL
+ExecStartPre=-/usr/bin/docker stop --time 10 ecs-agent
+
+# Remove the container named "ecs-agent"
+ExecStartPre=-/usr/bin/docker rm ecs-agent
+
+# Create the directories needed for the ECS Agent.
+ExecStartPre=-/bin/mkdir -p /var/lib/ecs/dhclient /var/ecs-data
+
+# The ECS Agent is started via docker run
+ExecStart=/usr/bin/docker run --name ecs-agent \
+    --init \
+    --detach=false \
+    --net=host \
+    --pid=host \
+    --cap-add=SYS_ADMIN \
+    --cap-add=NET_ADMIN \
+    --volume=/var/run:/var/run \
+    --volume=/var/log/ecs/:/log \
+    --volume=/var/lib/ecs/data:/data \
+    --volume=/etc/ecs:/etc/ecs \
+    --volume=/sbin:/sbin \
+    --volume=/lib:/lib \
+    --volume=/lib64:/lib64 \
+    --volume=/usr/lib:/usr/lib \
+    --volume=/proc:/host/proc \
+    --volume=/sys/fs/cgroup:/sys/fs/cgroup \
+    --volume=/var/lib/ecs/dhclient:/var/lib/dhclient \
+    --volume=/run/docker/execdriver/native:/var/lib/docker/execdriver/native:ro \
+    --publish=127.0.0.1:51678:51678 \
+    --env ECS_UPDATES_ENABLED=false \
+    --env ECS_DATADIR=/data \
+    --env ECS_ENABLE_TASK_IAM_ROLE=true \
+    --env ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true \
+    --env ECS_ENABLE_TASK_ENI=true \
+    --env ECS_LOGFILE=/log/ecs-agent.log \
+    --env ECS_AVAILABLE_LOGGING_DRIVERS=["json-file","syslog","awslogs","none"] \
+    --env ECS_CGROUP_PREFIX=ecs \
+    --env-file=/etc/ecs/ecs.config \
+    amazon/amazon-ecs-agent:${ECS_AGENT_VERSION}
+
+# Docker stop is used as it will send a SIGTEM and wait 10 seconds
+# before sending SIGKILL
+ExecStop=/usr/bin/docker stop --time 10 ecs-agent
+
+# Remove the IPTable rules needed to enable IAM Roles for Tasks.
+ExecStopPost=-/sbin/iptables -t nat -D PREROUTING -d 169.254.170.2/32 \
+    -p tcp -m tcp --dport 80 -j DNAT --to-destination 127.0.0.1:51679
+ExecStopPost=-/sbin/iptables -t nat -D OUTPUT -d 169.254.170.2/32 \
+    -p tcp -m tcp --dport 80 -j REDIRECT --to-ports 51679
+
+# Remove the port proxy to route traffic using loopback addresses
+ExecStopPost=/bin/sh -c \
+    "/sbin/sysctl --quiet --write net.ipv4.conf.all.route_localnet=$(/sbin/sysctl \
+    -q -n net.ipv4.conf.default.route_localnet)"
