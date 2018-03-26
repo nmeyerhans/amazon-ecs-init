@@ -56,38 +56,55 @@ StartLimitBurst=10
 # Depending on the OS, it could be placed in 
 # /etc/systemd/system/amazon-ecs-agent.d , and named 
 # ecs_agent_version_override.conf
-Environment=ECS_AGENT_VERSION=v1.17.2
+Environment=ECS_AGENT_VERSION=latest
+Environment=DOWNLOAD_LOCATION=/var/cache/ecs
 
 ExecStartPre=-/usr/bin/echo "Amazon ECS Agent systemd unit file version 1.0.0"
 
-# Load an updated ECS Agent, if it exists:
-ExecStartPre=-/bin/sh -c 'test -f /var/cache/ecs/desired-image && \
-    docker load --quiet --input=/var/cache/ecs/desired-image \
-    && rm -f $(cat /var/cache/ecs/desired-image) /var/cache/ecs/desired-image'
+# Create the directories needed for the ECS Agent.
+ExecStartPre=/bin/mkdir -p /var/lib/ecs/dhclient /var/ecs-data /etc/ecs \
+    /var/cache/ecs
 
-# If we don't have an ECS Agent, load from disk, if possible, or Docker Hub:
-ExecStartPre=/bin/sh -c "`docker inspect amazon/amazon-ecs-agent &>/dev/null` \
-    || docker load --quiet -input=/var/cache/ecs/ecs-agent.tar \
-    || docker pull amazon/amazon-ecs-agent:${ECS_AGENT_VERSION}"
+# Test if /etc/ecs/ecs.config is there, if not create it.
+ExecStartPre=/bin/sh -c 'touch -a /etc/ecs/ecs.config'
+
+# Set the varable REGION for the ECS Agnet download from S3.
+ExecStartPre=/bin/sh -c "REGION=$(curl -s 169.254.169.254/latest/meta-data/placement/availability-zone | sed 's/.$//')"
+
+# Download ECS Agent from S3.
+ExecStartPre=/usr/bin/echo "Downloading the ECS Agent from S3, if missing"
+ExecStartPre=/bin/sh -c '\
+case $$REGION in \
+    cn-north-1) \
+        wget https://s3.${REGION}.amazonaws.com.cn/amazon-ecs-agent/ecs-agent-${ECS_AGENT_VERSION}.{tar,tar.md5} --directory-prefix=${DOWNLOAD_LOCATION} --no-clobber --quiet ;; \
+    us-gov-west-1) \
+        wget https://s3-fips-${REGION}.amazonaws.com/amazon-ecs-agent/ecs-agent-${ECS_AGENT_VERSION}.{tar,tar.md5} --directory-prefix=${DOWNLOAD_LOCATION} --no-clobber --quiet ;; \
+    *) \
+        wget https://s3.amazonaws.com/amazon-ecs-agent/ecs-agent-${ECS_AGENT_VERSION}.{tar,tar.md5} --directory-prefix=${DOWNLOAD_LOCATION} --no-clobber --quiet ;; \
+esac'
+
+# # Check the MD5 Sum of the downloaded ECS Agent.
+ExecStartPre=/usr/bin/echo "Checking the hash of the ECS Agent"
+ExecStartPre=/bin/sh -c "if [[ $(md5sum ${DOWNLOAD_LOCATION}/ecs-agent-${ECS_AGENT_VERSION}.tar | cut -d ' ' -f 1) != $(cat ${DOWNLOAD_LOCATION}/ecs-agent-${ECS_AGENT_VERSION}.tar.md5) ]]; then exit 1; fi"
+
+# Load an updated ECS Agent downloaded from S3.
+ExecStartPre=/usr/bin/echo "Loading ECS Agent into Docker"
+ExecStartPre=/bin/sh -c "test -f ${DOWNLOAD_LOCATION}/ecs-agent-${ECS_AGENT_VERSION}.tar && \
+    docker load --quiet --input=${DOWNLOAD_LOCATION}/ecs-agent-${ECS_AGENT_VERSION}.tar"
 
 # Add the IPTable rules needed to enable IAM Roles for Tasks.
+ExecStartPre=/usr/bin/echo "Applying IPTables rules"
 ExecStartPre=/sbin/iptables -t nat -A PREROUTING -d 169.254.170.2/32 \
     -p tcp -m tcp --dport 80 -j DNAT --to-destination 127.0.0.1:51679
 ExecStartPre=/sbin/iptables -t nat -A OUTPUT -d 169.254.170.2/32 \
     -p tcp -m tcp --dport 80 -j REDIRECT --to-ports 51679
 
 # Allow the port proxy to route traffic using loopback addresses
+ExecStartPre=/usr/bin/echo "Modifying the attributes of the kernel"
 ExecStartPre=/sbin/sysctl --quiet --write net.ipv4.conf.all.route_localnet=1
 
-# Stop the ECS Agent if it was running. Docker stop is used
-# as it will send a SIGTEM and wait 10 seconds before sending SIGKILL
-ExecStartPre=-/bin/sh -c "`docker stop --time 10 ecs-agent &>/dev/null`"
-
 # Remove the container named "ecs-agent"
-ExecStartPre=-/bin/sh -c "`docker rm ecs-agent &>/dev/null`"
-
-# Create the directories needed for the ECS Agent.
-ExecStartPre=-/bin/mkdir -p /var/lib/ecs/dhclient /var/ecs-data
+ExecStartPre=-/bin/sh -c "docker rm ecs-agent > /dev/null 2>&1"
 
 # The ECS Agent is started via docker run
 ExecStart=/usr/bin/docker run --name ecs-agent \
@@ -110,21 +127,13 @@ ExecStart=/usr/bin/docker run --name ecs-agent \
     --volume=/var/lib/ecs/dhclient:/var/lib/dhclient \
     --volume=/run/docker/execdriver/native:/var/lib/docker/execdriver/native:ro \
     --publish=127.0.0.1:51678:51678 \
-    --env ECS_UPDATES_ENABLED=false \
-    --env ECS_DATADIR=/data \
-    --env ECS_ENABLE_TASK_IAM_ROLE=true \
-    --env ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true \
-    --env ECS_ENABLE_TASK_ENI=true \
-    --env ECS_LOGFILE=/log/ecs-agent.log \
-    --env ECS_AVAILABLE_LOGGING_DRIVERS=["json-file","syslog","awslogs","none"] \
-    --env ECS_CGROUP_PREFIX=ecs \
     --log-driver=journald \
     --env-file=/etc/ecs/ecs.config \
     amazon/amazon-ecs-agent:${ECS_AGENT_VERSION}
 
 # Docker stop is used as it will send a SIGTEM and wait 10 seconds
 # before sending SIGKILL
-ExecStartPre=-/bin/sh -c "`docker stop --time 10 ecs-agent &>/dev/null`"
+ExecStartPre=-/bin/sh -c "docker stop --time 10 ecs-agent > /dev/null 2>&1"
 
 # Remove the IPTable rules needed to enable IAM Roles for Tasks.
 ExecStopPost=-/sbin/iptables -t nat -D PREROUTING -d 169.254.170.2/32 \
