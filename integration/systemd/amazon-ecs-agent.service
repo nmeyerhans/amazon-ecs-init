@@ -16,14 +16,15 @@
 # attempts to duplicate the functionality of the `ecs-init` Golang package. The
 # notable differences currently are:
 #
-# 1. The unit file does an unconditional pull of the latest ECS Agent from
-# Docker Hub at startup.
+# 1. The unit file downloads latest ECS Agent from
+# S3 at startup, if the files (ECS Agent tar / MD5 hash) are missing.
 # 2. The unit file does not currently handle the Agent's self-upgrade
 # functionality.
+# 3. The unit file does not clean up downloaded ECS Agents in /var/cache/ecs.
 
 [Unit]
 Description=Amazon ECS Agent
-Documentation=http://docs.aws.amazon.com/AmazonECS/latest/developerguide/ECS_agent.html
+Documentation=https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ECS_agent.html
 Requires=docker.service
 After=docker.service
 
