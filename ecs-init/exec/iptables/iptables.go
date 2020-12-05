@@ -74,12 +74,13 @@ func NewNetfilterRoute(cmdExec exec.Exec) (*NetfilterRoute, error) {
 
 // Create creates the credentials proxy endpoint route in the netfilter table
 func (route *NetfilterRoute) Create() error {
-	err := route.modifyNetfilterEntry(iptablesTableNat, iptablesAppend, getPreroutingChainArgs)
-	if err != nil {
-		return err
-	}
-
+	var err error
 	if !skipLocalhostTrafficFilter() {
+		err = route.modifyNetfilterEntry(iptablesTableNat, iptablesAppend, getPreroutingChainArgs)
+		if err != nil {
+			return err
+		}
+
 		err = route.modifyNetfilterEntry(iptablesTableFilter, iptablesInsert, getLocalhostTrafficFilterInputChainArgs)
 		if err != nil {
 			return err
@@ -93,20 +94,23 @@ func (route *NetfilterRoute) Create() error {
 		}
 	}
 
-	return route.modifyNetfilterEntry(iptablesTableNat, iptablesAppend, getOutputChainArgs)
+	if !skipLocalhostTrafficFilter() {
+		return route.modifyNetfilterEntry(iptablesTableNat, iptablesAppend, getOutputChainArgs)
+	}
+	return nil
 }
 
 // Remove removes the route for the credentials endpoint from the netfilter
 // table
 func (route *NetfilterRoute) Remove() error {
-	preroutingErr := route.modifyNetfilterEntry(iptablesTableNat, iptablesDelete, getPreroutingChainArgs)
-	if preroutingErr != nil {
-		// Add more context for error in modifying the prerouting chain
-		preroutingErr = fmt.Errorf("error removing prerouting chain entry: %v", preroutingErr)
-	}
-
-	var localhostInputError, introspectionInputError error
+	var localhostInputError, introspectionInputError, preroutingErr error
 	if !skipLocalhostTrafficFilter() {
+		preroutingErr = route.modifyNetfilterEntry(iptablesTableNat, iptablesDelete, getPreroutingChainArgs)
+		if preroutingErr != nil {
+			// Add more context for error in modifying the prerouting chain
+			preroutingErr = fmt.Errorf("error removing prerouting chain entry: %v", preroutingErr)
+		}
+
 		localhostInputError = route.modifyNetfilterEntry(iptablesTableFilter, iptablesDelete, getLocalhostTrafficFilterInputChainArgs)
 		if localhostInputError != nil {
 			localhostInputError = fmt.Errorf("error removing input chain entry: %v", localhostInputError)
@@ -120,13 +124,16 @@ func (route *NetfilterRoute) Remove() error {
 		}
 	}
 
-	outputErr := route.modifyNetfilterEntry(iptablesTableNat, iptablesDelete, getOutputChainArgs)
-	if outputErr != nil {
-		// Add more context for error in modifying the output chain
-		outputErr = fmt.Errorf("error removing output chain entry: %v", outputErr)
-	}
+	if !skipLocalhostTrafficFilter() {
+		outputErr := route.modifyNetfilterEntry(iptablesTableNat, iptablesDelete, getOutputChainArgs)
+		if outputErr != nil {
+			// Add more context for error in modifying the output chain
+			outputErr = fmt.Errorf("error removing output chain entry: %v", outputErr)
+		}
 
-	return combinedError(preroutingErr, localhostInputError, introspectionInputError, outputErr)
+		return combinedError(preroutingErr, localhostInputError, introspectionInputError, outputErr)
+	}
+	return nil
 }
 
 func combinedError(errs ...error) error {
